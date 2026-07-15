@@ -23,12 +23,28 @@ except Exception as e:
     HAS_PYPROJ = False
     print(f"Advertencia: No se pudo importar pyproj ({e}). El recorte dinámico pre-evento no estará disponible.")
 
-# Rutas de los archivos relativas para compatibilidad con producción en la nube
+# Rutas de los archivos relativas
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-GEOJSON_PATH = os.path.join(BASE_DIR, "TANAGUARENA_revisado.geojson")
-TIFF_TANAGUARENA = os.path.join(BASE_DIR, "ORTOMOSAICO_TANAGUARENA.tif")
-TIFF_MACUTO = os.path.join(BASE_DIR, "ORTOMOSAICO_MACUTO03JUL26.tif")
-TIFF_CARABALLEDA = os.path.join(BASE_DIR, "MOSAICO_CARABALLEDA.tif")
+
+# Configuración de las tres zonas de trabajo
+ZONES = {
+    'TANAGUARENA': {
+        'geojson': os.path.join(BASE_DIR, "TANAGUARENA_revisado.geojson"),
+        'tif': os.path.join(BASE_DIR, "ORTOMOSAICO_TANAGUARENA.tif"),
+        'display': 'Tanaguarena'
+    },
+    'MACUTO': {
+        'geojson': os.path.join(BASE_DIR, "MACUTO_revisada.geojson"),
+        'tif': os.path.join(BASE_DIR, "ORTOMOSAICO_MACUTO03JUL26.tif"),
+        'display': 'Macuto'
+    },
+    'CARABALLEDA': {
+        'geojson': os.path.join(BASE_DIR, "Caraballeda_revsiada.geojson"),
+        'tif': os.path.join(BASE_DIR, "MOSAICO_CARABALLEDA.tif"),
+        'display': 'Caraballeda'
+    }
+}
+ACTIVE_ZONE = 'TANAGUARENA'
 
 # Carpeta de caché para recortes
 CROPS_DIR = os.path.join(BASE_DIR, "crops")
@@ -37,7 +53,6 @@ os.makedirs(CROPS_DIR, exist_ok=True)
 app = Flask(__name__)
 
 # Transformadores de coordenadas
-# De WGS84 (4326) a Web Mercator (3857) - para Google Satellite
 if HAS_PYPROJ:
     to_mercator = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
     to_geographic = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
@@ -45,23 +60,24 @@ else:
     to_mercator = None
     to_geographic = None
 
-
-# Cargar GeoJSON en memoria
+# Cargar GeoJSON en memoria según zona activa
 def load_geojson():
-    if not os.path.exists(GEOJSON_PATH):
-        raise FileNotFoundError(f"No se encontró el GeoJSON en {GEOJSON_PATH}")
-    with open(GEOJSON_PATH, "r", encoding="utf-8") as f:
+    path = ZONES[ACTIVE_ZONE]['geojson']
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"No se encontró el GeoJSON en {path}")
+    with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 def save_geojson(data):
-    temp_path = GEOJSON_PATH + ".tmp"
+    path = ZONES[ACTIVE_ZONE]['geojson']
+    temp_path = path + ".tmp"
     with open(temp_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    if os.path.exists(GEOJSON_PATH):
-        os.remove(GEOJSON_PATH)
-    os.rename(temp_path, GEOJSON_PATH)
+    if os.path.exists(path):
+        os.remove(path)
+    os.rename(temp_path, path)
 
-# Helpers para tiles de Google Satellite (Mercator)
+# Helpers para tiles de Google Satellite
 def latlon_to_tile(lon: float, lat: float, zoom: int):
     lat_rad = math.radians(lat)
     n = 2.0 ** zoom
@@ -81,16 +97,13 @@ def tile_bounds_3857(x: int, y: int, zoom: int):
     return minx, miny, maxx, maxy
 
 def agregar_grilla_y_norte(imagen: Image.Image, etiqueta: str = "") -> Image.Image:
-    """Dibuja una cruz central roja, una flecha norte en la esquina superior derecha y la etiqueta."""
     draw = ImageDraw.Draw(imagen)
     w, h = imagen.size
     
-    # Marca de centro
     draw.line([(w//2 - 15, h//2), (w//2 + 15, h//2)], fill=(255, 0, 0), width=2)
     draw.line([(w//2, h//2 - 15), (w//2, h//2 + 15)], fill=(255, 0, 0), width=2)
     draw.rectangle([w//2 - 2, h//2 - 2, w//2 + 2, h//2 + 2], fill=(255, 255, 0))
 
-    # Flecha norte
     cx, cy = w - 30, 30
     r = 15
     draw.ellipse([cx - r - 2, cy - r - 2, cx + r + 2, cy + r + 2], fill=(0, 0, 0, 120), outline=(255, 255, 255), width=1)
@@ -98,7 +111,6 @@ def agregar_grilla_y_norte(imagen: Image.Image, etiqueta: str = "") -> Image.Ima
     draw.polygon([(cx, cy + r), (cx - 6, cy - 2), (cx + 6, cy - 2)], fill=(200, 200, 200))
     draw.text((cx - 3, cy - r - 12), "N", fill=(255, 255, 255))
     
-    # Etiqueta
     if etiqueta:
         draw.rectangle([5, 5, 120, 25], fill=(0, 0, 0, 180))
         draw.text((10, 8), etiqueta, fill=(255, 255, 255))
@@ -106,7 +118,8 @@ def agregar_grilla_y_norte(imagen: Image.Image, etiqueta: str = "") -> Image.Ima
     return imagen
 
 def crop_pre_event(lon, lat, semilado_m=40.0):
-    """Descarga de Google Satellite alrededor del punto, con reintentos y fallback."""
+    if not HAS_PYPROJ:
+        return None
     x_centro, y_centro = to_mercator.transform(lon, lat)
     
     ulx_3857 = x_centro - semilado_m
@@ -120,7 +133,6 @@ def crop_pre_event(lon, lat, semilado_m=40.0):
     zoom = 19
     xtile, ytile = latlon_to_tile(lon, lat, zoom)
     
-    # Descargar cuadrícula de 3x3 tiles con robustez
     imgs = []
     import time
     for dy in [-1, 0, 1]:
@@ -130,7 +142,6 @@ def crop_pre_event(lon, lat, semilado_m=40.0):
             headers = {'User-Agent': 'Mozilla/5.0'}
             req = urllib.request.Request(url, headers=headers)
             
-            # Reintentar hasta 3 veces
             img = None
             for attempt in range(3):
                 try:
@@ -138,15 +149,12 @@ def crop_pre_event(lon, lat, semilado_m=40.0):
                         img = Image.open(io.BytesIO(response.read()))
                         break
                 except Exception as e:
-                    print(f"Error descargando tile x={xtile+dx}, y={ytile+dy} (intento {attempt+1}): {e}")
                     time.sleep(0.5)
             
-            # Fallback local si falla la descarga del tile
             if img is None:
-                print(f"Fallo definitivo al descargar tile en x={xtile+dx}, y={ytile+dy}. Usando mosaico vacío.")
                 img = Image.new('RGB', (256, 256), (30, 34, 42))
                 draw = ImageDraw.Draw(img)
-                draw.text((10, 120), "Error de Red/Límite Google", fill=(180, 180, 180))
+                draw.text((10, 120), "Error de Red Google", fill=(180, 180, 180))
             
             row.append(img)
         imgs.append(row)
@@ -171,24 +179,14 @@ def crop_pre_event(lon, lat, semilado_m=40.0):
     crop = agregar_grilla_y_norte(crop, "PRE-EVENTO")
     return crop
 
-
 def crop_post_event(lon, lat, semilado_m=40.0):
-    """Recorta de los ortomosaicos locales según coordenadas en formato WGS84."""
-    # Bounding boxes de los mosaicos en WGS84
-    # Tanaguarena: (-66.8420, 10.6071, -66.8092, 10.6198)
-    # Macuto: (-66.9104, 10.5957, -66.8663, 10.6138)
-    # Caraballeda: (-66.8727, 10.6059, -66.8327, 10.6233)
-    
-    if (-66.8420 <= lon <= -66.8092) and (10.6071 <= lat <= 10.6198):
-        tif_path = TIFF_TANAGUARENA
-    elif (-66.8727 <= lon <= -66.8327) and (10.6059 <= lat <= 10.6233):
-        tif_path = TIFF_CARABALLEDA
-    elif (-66.9104 <= lon <= -66.8663) and (10.5957 <= lat <= 10.6138):
-        tif_path = TIFF_MACUTO
-    else:
-        tif_path = TIFF_TANAGUARENA
+    if not HAS_RASTERIO:
+        return None
+        
+    tif_path = ZONES[ACTIVE_ZONE]['tif']
+    if not os.path.exists(tif_path):
+        return None
 
-    # Convertir buffer en metros a grados WGS84
     dlat = semilado_m / 111320.0
     dlon = semilado_m / (111320.0 * math.cos(math.radians(lat)))
     
@@ -200,7 +198,6 @@ def crop_post_event(lon, lat, semilado_m=40.0):
     with rasterio.open(tif_path) as src:
         window = from_bounds(ulx, lry, lrx, uly, src.transform)
         if src.count >= 3:
-            # Leer las primeras 3 bandas (RGB) para ignorar el canal Alpha si tiene 4 bandas
             data = src.read([1, 2, 3], window=window)
             rgb = np.moveaxis(data, 0, -1)
         else:
@@ -227,7 +224,7 @@ def index():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-        <title>Orientación de Derrumbes - Tanaguarena</title>
+        <title>Orientación de Derrumbes</title>
         <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
         <style>
             :root {
@@ -291,6 +288,49 @@ def index():
                 display: flex;
                 justify-content: space-between;
                 padding: 0 4px;
+            }
+            .btn-download {
+                background-color: #238636;
+                color: #ffffff;
+                font-size: 0.78rem;
+                font-weight: 700;
+                padding: 6px 12px;
+                border-radius: 6px;
+                border: none;
+                cursor: pointer;
+                text-decoration: none;
+                transition: background-color 0.15s ease;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.15);
+            }
+            .btn-download:hover {
+                background-color: #2ea043;
+            }
+            .zone-selector {
+                display: flex;
+                gap: 6px;
+                margin: 8px 0;
+                width: 100%;
+                max-width: 680px;
+            }
+            .zone-btn {
+                flex: 1;
+                background-color: #21262d;
+                border: 1px solid var(--border);
+                color: var(--text);
+                padding: 8px 0;
+                font-size: 0.85rem;
+                font-weight: 700;
+                border-radius: 8px;
+                cursor: pointer;
+                transition: all 0.15s ease;
+            }
+            .zone-btn.active {
+                background-color: #bc8cff;
+                border-color: #bc8cff;
+                color: #0d1117;
+            }
+            .zone-btn:hover:not(.active) {
+                background-color: #30363d;
             }
             .main-card {
                 background-color: var(--card-bg);
@@ -527,27 +567,10 @@ def index():
         </style>
     </head>
     <body>
-        <style>
-            .btn-download {
-                background-color: #238636;
-                color: #ffffff;
-                font-size: 0.78rem;
-                font-weight: 700;
-                padding: 6px 12px;
-                border-radius: 6px;
-                border: none;
-                cursor: pointer;
-                transition: background-color 0.15s ease;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.15);
-            }
-            .btn-download:hover {
-                background-color: #2ea043;
-            }
-        </style>
         <header>
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                <h1>Detección de Derrumbes (Tanaguarena)</h1>
-                <a href="/api/download" download class="btn-download">📥 Descargar Tabla</a>
+                <h1 id="appTitle">Detección de Derrumbes</h1>
+                <a href="/api/download" download class="btn-download">📥 Descargar Shapefile (.zip)</a>
             </div>
             <div class="progress-container">
                 <div class="progress-bar" id="progressBar"></div>
@@ -557,6 +580,13 @@ def index():
                 <span id="currentId">ID: --</span>
             </div>
         </header>
+
+        <!-- SELECCIÓN DE ZONAS -->
+        <div class="zone-selector">
+            <button id="zone_TANAGUARENA" class="zone-btn active" onclick="changeZone('TANAGUARENA')">Tanaguarena</button>
+            <button id="zone_MACUTO" class="zone-btn" onclick="changeZone('MACUTO')">Macuto</button>
+            <button id="zone_CARABALLEDA" class="zone-btn" onclick="changeZone('CARABALLEDA')">Caraballeda</button>
+        </div>
 
         <main class="main-card" id="mainCard">
             <div class="app-layout">
@@ -613,6 +643,7 @@ def index():
             let currentMode = 'post';
             let loadedPre = false;
             let loadedPost = false;
+            let activeZoneName = 'TANAGUARENA';
 
             function checkLoad(type) {
                 if (type === 'pre') loadedPre = true;
@@ -649,7 +680,7 @@ def index():
 
             // Funciones de Zoom
             function openZoom(event) {
-                event.stopPropagation(); // Evitar que el clic en zoom active el toggle del img-box
+                event.stopPropagation();
                 const modal = document.getElementById('zoomModal');
                 const zoomImg = document.getElementById('zoomImg');
                 
@@ -686,13 +717,65 @@ def index():
                 }
             }
 
+            async function changeZone(zone) {
+                try {
+                    const res = await fetch(`/api/set_zone/${zone}`);
+                    const data = await res.json();
+                    if (data.success) {
+                        activeZoneName = zone;
+                        document.querySelectorAll('.zone-btn').forEach(btn => btn.classList.remove('active'));
+                        document.getElementById(`zone_${zone}`).classList.add('active');
+                        
+                        // Restablecer el card principal por si acaso estaba en no-more
+                        document.getElementById('mainCard').innerHTML = `
+                            <div class="app-layout">
+                                <div class="image-pane">
+                                    <div class="toggle-container">
+                                        <button id="togglePre" class="toggle-btn" onclick="setMode('pre')">PRE</button>
+                                        <button id="togglePost" class="toggle-btn active" onclick="setMode('post')">POST</button>
+                                    </div>
+                                    <div class="img-box" onclick="toggleImages()" title="Alternar Pre/Post">
+                                        <div class="loader" id="preLoader"></div>
+                                        <img id="imgPre" src="" alt="Pre-evento" class="img-hidden" onload="checkLoad('pre')" onerror="checkLoad('pre')">
+                                        <img id="imgPost" src="" alt="Post-evento" onload="checkLoad('post')" onerror="checkLoad('post')">
+                                        <div class="zoom-trigger" onclick="openZoom(event)">🔍 Zoom</div>
+                                    </div>
+                                    <div class="tap-hint">💡 Toca la imagen para alternar PRE/POST</div>
+                                </div>
+                                <div class="controls-pane">
+                                    <div class="compass-grid">
+                                        <button class="btn dir" onclick="submitDirection('NO')">NO</button>
+                                        <button class="btn dir" onclick="submitDirection('N')">N</button>
+                                        <button class="btn dir" onclick="submitDirection('NE')">NE</button>
+                                        <button class="btn dir" onclick="submitDirection('O')">O</button>
+                                        <div class="btn center-btn">🧭</div>
+                                        <button class="btn dir" onclick="submitDirection('E')">E</button>
+                                        <button class="btn dir" onclick="submitDirection('SO')">SO</button>
+                                        <button class="btn dir" onclick="submitDirection('S')">S</button>
+                                        <button class="btn dir" onclick="submitDirection('SE')">SE</button>
+                                    </div>
+                                    <button class="btn skip" onclick="submitDirection('Omitido')">Omitir Edificio</button>
+                                </div>
+                            </div>
+                        `;
+                        
+                        fetchNext();
+                    }
+                } catch (e) {
+                    console.error("Error al cambiar zona", e);
+                }
+            }
+
             async function fetchNext() {
-                document.getElementById('preLoader').style.display = 'block';
+                const loader = document.getElementById('preLoader');
+                if (loader) loader.style.display = 'block';
                 loadedPre = false;
                 loadedPost = false;
                 
-                document.getElementById('imgPre').src = '';
-                document.getElementById('imgPost').src = '';
+                const imgPre = document.getElementById('imgPre');
+                const imgPost = document.getElementById('imgPost');
+                if (imgPre) imgPre.src = '';
+                if (imgPost) imgPost.src = '';
 
                 try {
                     const res = await fetch('/api/next');
@@ -702,7 +785,7 @@ def index():
                         document.getElementById('mainCard').innerHTML = `
                             <div class="no-more">
                                 <h2>🎉 ¡Felicidades!</h2>
-                                <p style="margin-top: 10px; color: #8b949e;">Todos los edificios han sido clasificados.</p>
+                                <p style="margin-top: 10px; color: #8b949e;">Todos los edificios de esta zona han sido clasificados.</p>
                             </div>
                         `;
                         document.getElementById('currentId').innerText = 'Completado';
@@ -717,8 +800,8 @@ def index():
                     setMode('post');
 
                     const id = currentFeature.properties.id_infraestructura;
-                    document.getElementById('imgPre').src = `/api/crop/${id}/pre?t=${Date.now()}`;
-                    document.getElementById('imgPost').src = `/api/crop/${id}/post?t=${Date.now()}`;
+                    if (imgPre) imgPre.src = `/api/crop/${id}/pre?t=${Date.now()}`;
+                    if (imgPost) imgPost.src = `/api/crop/${id}/post?t=${Date.now()}`;
 
                 } catch (e) {
                     console.error("Error cargando el siguiente elemento", e);
@@ -761,13 +844,20 @@ def index():
     """
     return render_template_string(html)
 
+@app.route("/api/set_zone/<zone>")
+def api_set_zone(zone):
+    global ACTIVE_ZONE
+    if zone in ZONES:
+        ACTIVE_ZONE = zone
+        return jsonify({"success": True, "active_zone": ACTIVE_ZONE})
+    return jsonify({"success": False, "error": "Zona no válida"}), 400
+
 @app.route("/api/next")
 def api_next():
     try:
         data = load_geojson()
         features = data.get("features", [])
         
-        # Filtrar solo identificados como derrumbado (label contiene 'derrumbado' o 'derrumado')
         affected = [
             f for f in features 
             if 'derrumbado' in f.get("properties", {}).get("label", "").lower() or
@@ -776,7 +866,6 @@ def api_next():
         
         total = len(affected)
         
-        # Contar clasificados y filtrar no clasificados
         unclassified = []
         classified_count = 0
         for f in affected:
@@ -789,7 +878,6 @@ def api_next():
         if not unclassified:
             return jsonify({"finished": True, "total": total, "classified": total})
             
-        # Selección aleatoria
         selected = random.choice(unclassified)
         return jsonify({
             "finished": False,
@@ -845,6 +933,9 @@ def api_crop(id_infraestructura, tipo):
         else:
             return "Tipo incorrecto", 400
             
+        if crop_img is None:
+            return "No se pudo realizar el recorte", 500
+            
         crop_img.save(cache_path, format="PNG")
         
         img_io = io.BytesIO()
@@ -889,46 +980,49 @@ def api_classify():
 @app.route("/api/download")
 def api_download():
     try:
-        data = load_geojson()
-        features = data.get("features", [])
+        import geopandas as gpd
+        import zipfile
+        import tempfile
         
-        # Filtrar solo identificados como derrumbado
-        affected = [
-            f for f in features 
-            if 'derrumbado' in f.get("properties", {}).get("label", "").lower() or
-               'derrumado' in f.get("properties", {}).get("label", "").lower()
-        ]
+        geojson_path = ZONES[ACTIVE_ZONE]['geojson']
+        gdf = gpd.read_file(geojson_path)
         
-        # Generar CSV en memoria
-        import csv
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(["id_infraestructura", "label", "longitud", "latitud", "orientacion_derrumbe"])
+        # Filtrar solo derrumbados
+        gdf['label_lower'] = gdf['label'].str.lower().fillna('')
+        gdf_affected = gdf[
+            gdf['label_lower'].str.contains('derrumbado') | 
+            gdf['label_lower'].str.contains('derrumado')
+        ].copy()
         
-        for f in affected:
-            props = f.get("properties", {})
-            lon = props.get("lon_wgs84")
-            lat = props.get("lat_wgs84")
-            orientacion = props.get("Orientacion del Derrumbe", "")
-            writer.writerow([
-                props.get("id_infraestructura"),
-                props.get("label"),
-                lon,
-                lat,
-                orientacion
-            ])
+        if 'label_lower' in gdf_affected.columns:
+            gdf_affected = gdf_affected.drop(columns=['label_lower'])
             
-        csv_data = output.getvalue()
-        # Agregar BOM para que Excel en Windows (español) lo abra correctamente
-        bom_csv = "\ufeff" + csv_data
+        if gdf_affected.empty:
+            return "No hay edificaciones afectadas para exportar", 400
+            
+        capa_nombre = f"orientacion_derrumbes_{ACTIVE_ZONE.lower()}"
         
-        return send_file(
-            io.BytesIO(bom_csv.encode('utf-8')),
-            mimetype="text/csv",
-            as_attachment=True,
-            download_name="orientacion_derrumbes_tanaguarena.csv"
-        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shp_path = os.path.join(tmpdir, f"{capa_nombre}.shp")
+            gdf_affected.to_file(shp_path, driver='ESRI Shapefile')
+            
+            memory_file = io.BytesIO()
+            with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for filename in os.listdir(tmpdir):
+                    filepath = os.path.join(tmpdir, filename)
+                    zf.write(filepath, filename)
+            memory_file.seek(0)
+            
+            return send_file(
+                memory_file,
+                mimetype="application/zip",
+                as_attachment=True,
+                download_name=f"{capa_nombre}.zip"
+            )
+            
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
