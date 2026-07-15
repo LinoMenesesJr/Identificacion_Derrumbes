@@ -1,0 +1,17 @@
+# Ignorar ortomosaicos locales pesados
+*.tif
+*.tiff
+*.zip
+*.tar
+*.gz
+
+# Ignorar archivos temporales
+*.tmp
+.idea/
+.vscode/
+__pycache__/
+*.pyc
+
+# Ignorar bases de datos locales y caches innecesarias si aplica
+*.db
+*.log
