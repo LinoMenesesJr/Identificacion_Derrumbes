@@ -12,16 +12,16 @@ try:
     import rasterio
     from rasterio.windows import from_bounds
     HAS_RASTERIO = True
-except ImportError:
+except Exception as e:
     HAS_RASTERIO = False
-    print("Advertencia: rasterio no está instalado. El recorte dinámico post-evento no estará disponible.")
+    print(f"Advertencia: No se pudo importar rasterio ({e}). El recorte dinámico post-evento no estará disponible.")
 
 try:
     from pyproj import Transformer
     HAS_PYPROJ = True
-except ImportError:
+except Exception as e:
     HAS_PYPROJ = False
-    print("Advertencia: pyproj no está instalado. El recorte dinámico pre-evento no estará disponible.")
+    print(f"Advertencia: No se pudo importar pyproj ({e}). El recorte dinámico pre-evento no estará disponible.")
 
 # Rutas de los archivos relativas para compatibilidad con producción en la nube
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
