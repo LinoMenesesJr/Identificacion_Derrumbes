@@ -984,48 +984,58 @@ def api_download():
         import zipfile
         import tempfile
         
-        geojson_path = ZONES[ACTIVE_ZONE]['geojson']
-        gdf = gpd.read_file(geojson_path)
-        
-        # Filtrar solo derrumbados que tengan información de orientación de derrumbe válida
-        gdf['label_lower'] = gdf['label'].str.lower().fillna('')
-        
-        # Filtro de orientación válida (no nula, no vacía y que no sea Omitido)
-        if 'Orientacion del Derrumbe' in gdf.columns:
-            gdf_affected = gdf[
-                (gdf['label_lower'].str.contains('derrumbado') | gdf['label_lower'].str.contains('derrumado')) &
-                gdf['Orientacion del Derrumbe'].notna() &
-                (gdf['Orientacion del Derrumbe'] != '') &
-                (gdf['Orientacion del Derrumbe'] != 'Omitido')
-            ].copy()
-        else:
-            gdf_affected = gdf.iloc[0:0].copy() # DataFrame vacío si la columna no existe aún
-        
-        if 'label_lower' in gdf_affected.columns:
-            gdf_affected = gdf_affected.drop(columns=['label_lower'])
-            
-        if gdf_affected.empty:
-            return "No hay edificaciones afectadas para exportar", 400
-            
-        capa_nombre = f"orientacion_derrumbes_{ACTIVE_ZONE.lower()}"
+        # Archivo ZIP en memoria
+        memory_file = io.BytesIO()
+        has_content = False
         
         with tempfile.TemporaryDirectory() as tmpdir:
-            shp_path = os.path.join(tmpdir, f"{capa_nombre}.shp")
-            gdf_affected.to_file(shp_path, driver='ESRI Shapefile')
+            # Iterar y exportar cada zona que tenga al menos un dato clasificado
+            for zone_key, zone_info in ZONES.items():
+                geojson_path = zone_info['geojson']
+                if not os.path.exists(geojson_path):
+                    continue
+                    
+                gdf = gpd.read_file(geojson_path)
+                
+                # Filtrar solo derrumbados clasificados válidos
+                gdf['label_lower'] = gdf['label'].str.lower().fillna('')
+                
+                if 'Orientacion del Derrumbe' in gdf.columns:
+                    gdf_affected = gdf[
+                        (gdf['label_lower'].str.contains('derrumbado') | gdf['label_lower'].str.contains('derrumado')) &
+                        gdf['Orientacion del Derrumbe'].notna() &
+                        (gdf['Orientacion del Derrumbe'] != '') &
+                        (gdf['Orientacion del Derrumbe'] != 'Omitido')
+                    ].copy()
+                else:
+                    gdf_affected = gdf.iloc[0:0].copy()
+                    
+                if 'label_lower' in gdf_affected.columns:
+                    gdf_affected = gdf_affected.drop(columns=['label_lower'])
+                    
+                # Si la zona tiene elementos clasificados, guardarla en el directorio temporal
+                if not gdf_affected.empty:
+                    capa_nombre = f"orientacion_derrumbes_{zone_key.lower()}"
+                    shp_path = os.path.join(tmpdir, f"{capa_nombre}.shp")
+                    gdf_affected.to_file(shp_path, driver='ESRI Shapefile')
+                    has_content = True
             
-            memory_file = io.BytesIO()
+            if not has_content:
+                return "No hay edificaciones clasificadas con orientación en ninguna de las zonas", 400
+                
+            # Comprimir todos los archivos generados en el directorio temporal
             with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
                 for filename in os.listdir(tmpdir):
                     filepath = os.path.join(tmpdir, filename)
                     zf.write(filepath, filename)
-            memory_file.seek(0)
-            
-            return send_file(
-                memory_file,
-                mimetype="application/zip",
-                as_attachment=True,
-                download_name=f"{capa_nombre}.zip"
-            )
+                    
+        memory_file.seek(0)
+        return send_file(
+            memory_file,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name="orientacion_derrumbes_proyecto.zip"
+        )
             
     except Exception as e:
         import traceback
