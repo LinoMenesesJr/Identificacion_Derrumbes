@@ -987,12 +987,19 @@ def api_download():
         geojson_path = ZONES[ACTIVE_ZONE]['geojson']
         gdf = gpd.read_file(geojson_path)
         
-        # Filtrar solo derrumbados
+        # Filtrar solo derrumbados que tengan información de orientación de derrumbe válida
         gdf['label_lower'] = gdf['label'].str.lower().fillna('')
-        gdf_affected = gdf[
-            gdf['label_lower'].str.contains('derrumbado') | 
-            gdf['label_lower'].str.contains('derrumado')
-        ].copy()
+        
+        # Filtro de orientación válida (no nula, no vacía y que no sea Omitido)
+        if 'Orientacion del Derrumbe' in gdf.columns:
+            gdf_affected = gdf[
+                (gdf['label_lower'].str.contains('derrumbado') | gdf['label_lower'].str.contains('derrumado')) &
+                gdf['Orientacion del Derrumbe'].notna() &
+                (gdf['Orientacion del Derrumbe'] != '') &
+                (gdf['Orientacion del Derrumbe'] != 'Omitido')
+            ].copy()
+        else:
+            gdf_affected = gdf.iloc[0:0].copy() # DataFrame vacío si la columna no existe aún
         
         if 'label_lower' in gdf_affected.columns:
             gdf_affected = gdf_affected.drop(columns=['label_lower'])
